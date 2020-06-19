@@ -20,4 +20,5 @@ func main() {
 
 ```
 
-Link to the [app](tfg.naulacambra.com)
+## Project Link
+[TFG Arnau Lacambra](tfg.naulacambra.com)
