@@ -15,14 +15,29 @@ import (
 	arangoDriver "github.com/arangodb/go-driver"
 	"github.com/arangodb/go-driver/http"
 
+	"go.mongodb.org/mongo-driver/bson"
 	mongoDriver "go.mongodb.org/mongo-driver/mongo"
 	mongoOptions "go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type ChannelInfo struct {
+	Channel int       `json:"Channel"`
+	Values  []int     `json:"Values"`
+	From    time.Time `json:"From"`
+	To      time.Time `json:"To"`
+}
+
+type ChannelInfoCSV struct {
 	Channel int
 	Value   int
 	Time    time.Time
+}
+
+type ChannelDataJson struct {
+	Channel int    `json:"Channel"`
+	Values  []int  `json:"Values"`
+	From    string `json:"From"`
+	To      string `json:"To"`
 }
 
 type ChannelInfoJson struct {
@@ -61,16 +76,19 @@ func getArangoClient() arangoDriver.Client {
 }
 
 func getMongoClient(ctx context.Context) *mongoDriver.Client {
-	client, err := mongoDriver.NewClient(mongoOptions.Client().ApplyURI("mongodb://127.0.0.1:27017"))
+	// client, err := mongoDriver.NewClient(mongoOptions.Client().ApplyURI("mongodb://127.0.0.1:27017"))
+	client, err := mongoDriver.NewClient(mongoOptions.Client().ApplyURI("mongodb://root:root123@161.35.218.190:27017"))
 
 	if err != nil {
 		fmt.Println("ERROR CONNECTING TO MONGO DATABASE : ", err)
+		panic(err)
 	}
 
 	err = client.Connect(ctx)
 
 	if err != nil {
 		fmt.Println("ERROR CONNECTING TO MONGO DATABASE : ", err)
+		panic(err)
 	}
 
 	return client
@@ -119,7 +137,6 @@ func originalLoadJSON() {
 	options := &arangoDriver.CreateCollectionOptions{
 		WaitForSync: true,
 	}
-	start := time.Now()
 	exists, _ := db.CollectionExists(ctx, colName)
 	var col arangoDriver.Collection = nil
 
@@ -135,13 +152,13 @@ func originalLoadJSON() {
 
 	files, _ := ioutil.ReadDir("D:\\json")
 
-	for fileIndex, f := range files {
+	for _, f := range files {
 		// loading file
 		jsonFile, _ := ioutil.ReadFile(fmt.Sprintf("D:\\json\\%s", f.Name()))
 
 		// parse title to get time info
 		var channelInfoArr []interface{}
-		_ = json.Unmarshal([]byte(json_file), &channelInfoArr)
+		_ = json.Unmarshal([]byte(jsonFile), &channelInfoArr)
 
 		for _, channelInfo := range channelInfoArr {
 			field, _ := channelInfo.(map[string]interface{})
@@ -193,11 +210,11 @@ func loadJSON(ratio int) {
 	for fileIndex, f := range files {
 
 		// loading file
-		json_file, _ := ioutil.ReadFile(fmt.Sprintf("D:\\Documentos\\TFG\\json-%d\\%s", ratio, f.Name()))
+		jsonFile, _ := ioutil.ReadFile(fmt.Sprintf("D:\\Documentos\\TFG\\json-%d\\%s", ratio, f.Name()))
 
 		// parse title to get time info
 		var channelInfoArr []interface{}
-		_ = json.Unmarshal([]byte(json_file), &channelInfoArr)
+		_ = json.Unmarshal([]byte(jsonFile), &channelInfoArr)
 
 		for _, channelInfo := range channelInfoArr {
 			field, _ := channelInfo.(map[string]interface{})
@@ -247,63 +264,53 @@ func loadJSON(ratio int) {
 	fmt.Println(fmt.Sprintf("elapsed %s", durStr))
 }
 
-func transferJSON() {
-	actx := arangoDriver.WithQueryCount(context.Background())
+func transferJSON(path string, ratio int) {
 	mctx, _ := context.WithTimeout(context.Background(), 1000*time.Second)
-	adb := getArangoDb(actx, "wifi-viewer")
-	mdb := getMongoDb(mctx, "wifivisualizer")
-
-	//defer cancel()
-
-	fromCollectionName := "coll_wifi_vis"
-	toCollectionName := "coll_wifi_vis"
+	mdb := getMongoDb(mctx, "wifivis")
+	collection := fmt.Sprintf("all_channel_%d", ratio)
 
 	opts := mongoOptions.CreateCollection()
 
-	mdb.CreateCollection(mctx, toCollectionName, opts)
+	mdb.CreateCollection(mctx, collection, opts)
 
-	toCollection := mdb.Collection(toCollectionName)
+	toCollection := mdb.Collection(collection)
 
-	for channel := 1; channel <= 24; channel++ {
-		query := fmt.Sprintf(`
-			FOR doc IN %s
-			FILTER doc.Channel == @channel
-			RETURN {
-				Channel: doc.Channel,
-				Values: doc.Values,
-				From: doc.From,
-				To: doc.To
-			}`, fromCollectionName)
+	toCollection.DeleteMany(mctx, bson.D{})
 
-		bindVars := map[string]interface{}{
-			"channel": channel,
+	files, _ := ioutil.ReadDir(fmt.Sprintf("%s-%d", path, ratio))
+
+	for fileIndex, f := range files {
+		// loading file
+		jsonFile, _ := ioutil.ReadFile(fmt.Sprintf("%s-%d\\%s", path, ratio, f.Name()))
+
+		// parse title to get time info
+		var channelInfoArr []ChannelDataJson
+		_ = json.Unmarshal([]byte(jsonFile), &channelInfoArr)
+
+		var rows []interface{}
+
+		for _, channelInfo := range channelInfoArr {
+			from, _ := time.Parse("02-Jan-2006 15:04:05", channelInfo.From)
+			to, _ := time.Parse("02-Jan-2006 15:04:05", channelInfo.To)
+
+			doc := ChannelInfoJson{
+				Channel: channelInfo.Channel,
+				Values:  channelInfo.Values,
+				From:    from,
+				To:      to,
+			}
+
+			rows = append(rows, doc)
 		}
 
-		cursor, err := adb.Query(actx, query, bindVars)
+		opts := mongoOptions.InsertMany().SetOrdered(false)
+		_, err := toCollection.InsertMany(mctx, rows, opts)
+
 		if err != nil {
-			fmt.Println("ERROR IN INTERLINKING COUNT CURSOR : ", err)
-		}
-
-		defer cursor.Close()
-
-		count := int(cursor.Count())
-
-		for i := 0; i < count; i++ {
-			var row ChannelInfoJson
-
-			_, err := cursor.ReadDocument(actx, &row)
-
-			opts := mongoOptions.InsertOne()
-			_, err = toCollection.InsertOne(mctx, row, opts)
-
-			if err != nil {
-				fmt.Println("Item is not saved", err)
-				break
-			}
-
-			if arangoDriver.IsNoMoreDocuments(err) {
-				break
-			}
+			fmt.Println("Items are not saved", err)
+			break
+		} else {
+			fmt.Println(fmt.Sprintf("Items saved - %d", fileIndex))
 		}
 	}
 }
@@ -521,7 +528,7 @@ func loadCsv() {
 	for fileIndex, f := range files {
 		fmt.Println(fmt.Sprintf("start loading file %d", fileIndex))
 		// loading file
-		csv_file, _ := os.Open(fmt.Sprintf("D:\\Documentos\\TFG\\csv\\%s", f.Name()))
+		csvFile, _ := os.Open(fmt.Sprintf("D:\\Documentos\\TFG\\csv\\%s", f.Name()))
 		dateReg := regexp.MustCompile(`it\d{4}_(?P<date>\d*)-(?P<month>\d*)-(?P<year>\d*)_(?P<hour>\d*)-(?P<minute>\d*)-(?P<second>\d*)`)
 
 		// parse title to get time info
@@ -534,7 +541,7 @@ func loadCsv() {
 		minute, _ := strconv.Atoi(match[0][5])
 		second, _ := strconv.Atoi(match[0][6])
 
-		reader := csv.NewReader(csv_file)
+		reader := csv.NewReader(csvFile)
 		channelIndex := 1
 
 		for {
@@ -550,7 +557,7 @@ func loadCsv() {
 				value, _ := strconv.Atoi(sValue)
 
 				// create document
-				doc := ChannelInfo{
+				doc := ChannelInfoCSV{
 					Channel: channelIndex,
 					Value:   value,
 					Time:    time.Date(2000+year, time.Month(month), date, hour, minute, second, timeIndex*10000, time.UTC),
@@ -583,8 +590,5 @@ func loadCsv() {
 }
 
 func main() {
-	//loadCsv()
-	//loadJson(1)
-	//loadJson(10)
-	loadAndReduceJSONList(100)
+	transferJSON("D:\\json", 100)
 }
